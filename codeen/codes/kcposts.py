@@ -9,7 +9,82 @@ from tqdm import tqdm
 import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-import time
+import asyncio
+
+class DownloadManager:
+    def __init__(self, max_workers = 5):
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.semaphore = threading.Semaphore(max_workers)
+
+    def download_files(self, file_list, folder_path):
+        seen_files = set()
+        futures = []
+        for idx, (original_name, url) in enumerate(file_list, start=1):
+            # Check if URL is from allowed domains
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.split('.')[-2] + '.' + parsed_url.netloc.split('.')[-1]  # Get main domain
+            if domain not in ['kemono.su', 'coomer.su']:
+                tqdm.write(f"⚠️ Ignoring not allowed domain URL: {url}")
+                continue
+
+            # Derive file extension
+            extension = os.path.splitext(parsed_url.path)[1] or '.bin'
+
+            # Handle case where no original name is provided
+            if not original_name or original_name.strip() == "":
+                sanitized_name = str(idx)
+            else:
+                sanitized_name = adapt_file_name(original_name)
+
+            # Generate unique file name
+            file_name = f"{idx}-{sanitized_name}{extension}"
+            if file_name in seen_files:
+                continue  # Skip duplicates
+
+            seen_files.add(file_name)
+            file_path = os.path.join(folder_path, file_name)
+
+            self.semaphore.acquire()
+            # Download the file
+            future = self.executor.submit(self._download_file, url, file_path)
+            futures.append(asyncio.wrap_future(future))
+        
+        return futures
+
+    def _download_file(self, file_url, save_path):
+        """Download a file from a URL and save it to the specified path."""
+        to_return = False
+        try:
+            response = requests.get(file_url, stream=True)
+            response.raise_for_status()
+
+            total_size = int(response.headers.get("content-length", 0))
+            position = int(threading.current_thread().name.split('_')[-1]) + 1
+            with tqdm(total=total_size, unit="B", unit_scale=True, leave=False, position=position) as bar:
+                full_path = Path(save_path)
+                dirname = full_path.parts[-2]
+                if len(dirname) > 20:
+                    dirname = dirname[:17] + "..."
+                filename = full_path.name
+                if len(filename) > 15:
+                    filename = filename[:8] + "..." + filename[-4:]
+                name = f"{dirname:>20}/{filename:15}"
+                bar.set_description(name)
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            bar.update(len(chunk))
+                            f.write(chunk)
+            to_return = True
+        except Exception as e:
+            tqdm.write(f"Download failed {file_url}: {e}")
+        finally:
+            self.semaphore.release()
+            return to_return
+
+
+manager = DownloadManager()
+
 
 def load_config(config_path='config/conf.json'):
     """
@@ -175,72 +250,8 @@ def adapt_file_name(name):
     Sanitize file name by removing special characters and reducing its size.
     """
     return sanitize_filename(Path(unquote(name)).stem)
-    sanitized = re.sub(r'[^a-zA-Z0-9]', '_', unquote(name).split('.')[0])
-    return sanitized[:50]  # Limit length to 50 characters
 
-def download_file(file_url, save_path):
-    """Download a file from a URL and save it to the specified path."""
-    try:
-        response = requests.get(file_url, stream=True)
-        response.raise_for_status()
-
-        total_size = int(response.headers.get("content-length", 0))
-        position = int(threading.current_thread().name.split('_')[-1]) + 1
-        with tqdm(total=total_size, unit="B", unit_scale=True, leave=False, position=position) as bar:
-            full_path = Path(save_path)
-            full_name = f"{full_path.name}"
-            name = full_name
-            if len(full_name) > 30:
-                name = full_name[:20] + "..." + full_name[-7:]
-            bar.set_description(name)
-            with open(save_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        bar.update(len(chunk))
-                        f.write(chunk)
-    except Exception as e:
-        tqdm.write(f"Download failed {file_url}: {e}")
-
-def download_files(file_list, folder_path):
-    """
-    Download files from a list of URLs and save them with unique names in the folder_path.
-
-    :param file_list: List of tuples with original name and URL [(name, url), ...]
-    :param folder_path: Directory to save downloaded files
-    """
-    seen_files = set()
-
-    with ThreadPoolExecutor(max_workers=3) as executer:
-        for idx, (original_name, url) in enumerate(file_list, start=1):
-            # Check if URL is from allowed domains
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc.split('.')[-2] + '.' + parsed_url.netloc.split('.')[-1]  # Get main domain
-            if domain not in ['kemono.su', 'coomer.su']:
-                tqdm.write(f"⚠️ Ignoring not allowed domain URL: {url}")
-                continue
-
-            # Derive file extension
-            extension = os.path.splitext(parsed_url.path)[1] or '.bin'
-
-            # Handle case where no original name is provided
-            if not original_name or original_name.strip() == "":
-                sanitized_name = str(idx)
-            else:
-                sanitized_name = adapt_file_name(original_name)
-
-            # Generate unique file name
-            file_name = f"{idx}-{sanitized_name}{extension}"
-            if file_name in seen_files:
-                continue  # Skip duplicates
-
-            seen_files.add(file_name)
-            file_path = os.path.join(folder_path, file_name)
-
-            # Download the file
-            executer.submit(download_file, url, file_path)
-
-
-def save_post_content(post_data, folder_path, config):
+async def save_post_content(post_data, folder_path, config):
     """
     Save post content and download files based on configuration settings.
     Now includes support for poll data if present.
@@ -394,70 +405,79 @@ def save_post_content(post_data, folder_path, config):
     unique_files_to_download = list({url: (name, url) for name, url in all_files_to_download}.values())
 
     # Download files to the specified folder
-    download_files(unique_files_to_download, folder_path)
+    futures = manager.download_files(unique_files_to_download, folder_path)
+    return futures
 
 def sanitize_filename(filename):
     """Sanitize filename by removing invalid characters and replacing spaces with underscores."""
     filename = re.sub(r'[\\/*?\"<>|:]|[\\/*?\"<>|:\.]+$', '', filename)
     return filename.replace(' ', '_')
 
-def process_links(links, config):
-    bar = tqdm(links, position=0)
-    for user_link in bar:
-        try:
-            # print(f"\n--- Processing link: {user_link} ---")
-            
-            # Extract data from the link
-            domain, service, user_id, post_id = extract_data_from_link(user_link)
+async def process_links(links, config):
+    with tqdm(total=len(links) + 1, position=0) as bar:
+        futures = []
+        for user_link in links:
+            try:
+                # print(f"\n--- Processing link: {user_link} ---")
+                
+                # Extract data from the link
+                domain, service, user_id, post_id = extract_data_from_link(user_link)
 
-            # Setup paths
-            base_path = domain  # Use domain as base path (kemono or coomer)
-            profiles_path = os.path.join(base_path, "profiles.json")
+                # Setup paths
+                base_path = domain  # Use domain as base path (kemono or coomer)
+                profiles_path = os.path.join(base_path, "profiles.json")
 
-            ensure_directory(base_path)
+                ensure_directory(base_path)
 
-            # Load existing profiles
-            profiles = load_profiles(profiles_path)
+                # Load existing profiles
+                profiles = load_profiles(profiles_path)
 
-            # Fetch and save profile if not already in profiles.json
-            if user_id not in profiles:
-                profile_data = fetch_profile(domain, service, user_id)
-                profiles[user_id] = profile_data
-                save_profiles(profiles_path, profiles)
-            else:
-                profile_data = profiles[user_id]
+                # Fetch and save profile if not already in profiles.json
+                if user_id not in profiles:
+                    profile_data = fetch_profile(domain, service, user_id)
+                    profiles[user_id] = profile_data
+                    save_profiles(profiles_path, profiles)
+                else:
+                    profile_data = profiles[user_id]
 
-            # Criar pasta específica para o usuário
-            user_name = sanitize_filename(profile_data.get("name", "unknown_user"))
-            safe_service = sanitize_filename(service)
-            safe_user_id = sanitize_filename(user_id)
+                # Criar pasta específica para o usuário
+                user_name = sanitize_filename(profile_data.get("name", "unknown_user"))
+                safe_service = sanitize_filename(service)
+                safe_user_id = sanitize_filename(user_id)
 
-            user_folder = os.path.join(base_path, f"{user_name}-{safe_service}-{safe_user_id}")
-            ensure_directory(user_folder)
+                user_folder = os.path.join(base_path, f"{user_name}-{safe_service}-{safe_user_id}")
+                ensure_directory(user_folder)
 
-            # Create posts folder and post-specific folder
-            posts_folder = os.path.join(user_folder, "posts")
-            ensure_directory(posts_folder)
+                # Create posts folder and post-specific folder
+                posts_folder = os.path.join(user_folder, "posts")
+                ensure_directory(posts_folder)
 
-            # Fetch post data
-            post_data = fetch_post(domain, service, user_id, post_id)
-            post_folder = os.path.join(posts_folder, sanitize_filename(f"{post_id}_{post_data['post']['title']}"))
-            bar.set_description(f"Processing: {post_id} {post_data['post']['title'][:30]}")
+                # Fetch post data
+                post_data = fetch_post(domain, service, user_id, post_id)
+                post_folder = os.path.join(posts_folder, sanitize_filename(f"{post_id}_{post_data['post']['title']}"))
+                bar.set_description(f"Processing: {post_id} {post_data['post']['title'][:30]}")
 
-            ensure_directory(post_folder)
+                ensure_directory(post_folder)
 
-            
-            # Salvar conteúdo do post usando as configurações
-            save_post_content(post_data, post_folder, config)
+                
+                # Salvar conteúdo do post usando as configurações
+                save_future = await save_post_content(post_data, post_folder, config)
+                futures.extend(save_future)
+                bar.update()
 
-        except Exception as e:
-            tqdm.write(f"❌ Error processing link {user_link}: {e}")
-            # import traceback
-            # traceback.print_exc()
-            continue  # Continua processando próximos links mesmo se um falhar
-    bar.close()
+            except Exception as e:
+                tqdm.write(f"❌ Error processing link {user_link}: {e}")
+                import traceback
+                traceback.print_exc()
+                bar.update()
+                continue  # Continua processando próximos links mesmo se um falhar
 
-def process_json(json_file_path, config):
+        bar.set_description("Wait until download is finished...")
+        result = await asyncio.gather(*futures)
+        bar.update()
+        bar.refresh()
+
+async def process_json(json_file_path, config):
     # Pega o caminho do arquivo JSON a partir do argumento da linha de comando
 
     # Verifica se o arquivo existe
@@ -493,7 +513,7 @@ def process_json(json_file_path, config):
             continue
         post_links.append(post.get("link"))
 
-    process_links(post_links, config)
+    await process_links(post_links, config)
     # Process each post sequentially
     """
     with tqdm(total=len(posts), position=0, leave=False) as bar:
@@ -505,7 +525,7 @@ def process_json(json_file_path, config):
     """
 
 
-def main():
+async def main():
     # Carregar configurações
     config = load_config()
 
@@ -519,14 +539,14 @@ def main():
 
     if sys.argv[1] == "--json":
         json_file_path = sys.argv[2]
-        process_json(json_file_path, config)
+        await process_json(json_file_path, config)
 
 
     else:
         # Processar cada link passado
         links = sys.argv[1:]
-        process_links(links, config)
+        await process_links(links, config)
     
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
