@@ -159,24 +159,18 @@ def download_specific_posts():
         return
 
     links = [link.strip() for link in links if link.strip()]
+    link_sanit = []
 
+    script_path = os.path.join('codes', 'kcposts.py')
     for link in links:
-        try:
-            domain = link.split('/')[2]
-            if domain == 'kemono.su':
-                script_path = os.path.join('codes', 'kcposts.py')
-            elif domain == 'coomer.su':
-                script_path = os.path.join('codes', 'kcposts.py')
-            else:
-                print(f"Domain not supported: {domain}")
-                continue
+        domain = link.split('/')[2]
+        if domain not in ['kemono.su', 'coomer.su']:
+            print(f"Domain not supported: {domain}")
+            continue
+        link_sanit.append(link)
 
-            # Executa o script específico para o domínio
-            subprocess.run(['python', script_path, link], check=True)
-        except IndexError:
-            print(f"Link format error: {link}")
-        except subprocess.CalledProcessError:
-            print(f"Error downloading the post: {link}")
+    # Executa o script específico para o domínio
+    subprocess.run(['python', script_path, *links], check=True)
 
     input("\nPress Enter to continue...")
 
