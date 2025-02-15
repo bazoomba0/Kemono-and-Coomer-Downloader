@@ -5,6 +5,11 @@ import requests
 import re
 from html.parser import HTMLParser
 from urllib.parse import quote, urlparse, unquote
+from tqdm import tqdm
+import threading
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 def load_config(config_path='config/conf.json'):
     """
@@ -14,10 +19,12 @@ def load_config(config_path='config/conf.json'):
     try:
         with open(config_path, 'r') as file:
             config = json.load(file)
-        return {
-            'post_info': config.get('post_info', 'md'),  # Padrão para md se não especificado
-            'save_info': config.get('save_info', True)   # Padrão para True se não especificado
-        }
+        if 'post_info' not in config:
+            config['post_info'] = 'md'
+        if 'save_info' not in config:
+            config['save_info'] = True
+
+        return config
     except FileNotFoundError:
         # Configurações padrão se o arquivo não existir
         return {
@@ -31,6 +38,38 @@ def load_config(config_path='config/conf.json'):
             'save_info': True
         }
 
+def normalize_path(path):
+    """
+    Normaliza o caminho do arquivo para lidar com caracteres não-ASCII
+    """
+    try:
+        # Se o caminho original existir, retorna ele
+        if os.path.exists(path):
+            return path
+            
+        # Extrai o nome do arquivo e os componentes do caminho
+        filename = os.path.basename(path)
+        path_parts = path.split(os.sep)
+        
+        # Identifica se está procurando em kemono ou coomer
+        base_dir = None
+        if 'kemono' in path_parts:
+            base_dir = 'kemono'
+        elif 'coomer' in path_parts:
+            base_dir = 'coomer'
+            
+        if base_dir:
+            # Procura em todos os subdiretórios do diretório base
+            for root, dirs, files in os.walk(base_dir):
+                if filename in files:
+                    return os.path.join(root, filename)
+        
+        # Se ainda não encontrou, tenta o caminho normalizado
+        return os.path.abspath(os.path.normpath(path))
+
+    except Exception as e:
+        print(f"Error when normalizing path: {e}")
+        return path
 def ensure_directory(path):
     if not os.path.exists(path):
         os.makedirs(path)
@@ -135,9 +174,32 @@ def adapt_file_name(name):
     """
     Sanitize file name by removing special characters and reducing its size.
     """
+    return sanitize_filename(Path(unquote(name)).stem)
     sanitized = re.sub(r'[^a-zA-Z0-9]', '_', unquote(name).split('.')[0])
     return sanitized[:50]  # Limit length to 50 characters
 
+def download_file(file_url, save_path):
+    """Download a file from a URL and save it to the specified path."""
+    try:
+        response = requests.get(file_url, stream=True)
+        response.raise_for_status()
+
+        total_size = int(response.headers.get("content-length", 0))
+        position = int(threading.current_thread().name.split('_')[-1]) + 1
+        with tqdm(total=total_size, unit="B", unit_scale=True, leave=False, position=position) as bar:
+            full_path = Path(save_path)
+            full_name = f"{full_path.name}"
+            name = full_name
+            if len(full_name) > 30:
+                name = full_name[:20] + "..." + full_name[-7:]
+            bar.set_description(name)
+            with open(save_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        bar.update(len(chunk))
+                        f.write(chunk)
+    except Exception as e:
+        tqdm.write(f"Download failed {file_url}: {e}")
 
 def download_files(file_list, folder_path):
     """
@@ -148,41 +210,34 @@ def download_files(file_list, folder_path):
     """
     seen_files = set()
 
-    for idx, (original_name, url) in enumerate(file_list, start=1):
-        # Check if URL is from allowed domains
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc.split('.')[-2] + '.' + parsed_url.netloc.split('.')[-1]  # Get main domain
-        if domain not in ['kemono.su', 'coomer.su']:
-            print(f"⚠️ Ignoring not allowed domain URL: {url}")
-            continue
+    with ThreadPoolExecutor(max_workers=3) as executer:
+        for idx, (original_name, url) in enumerate(file_list, start=1):
+            # Check if URL is from allowed domains
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.split('.')[-2] + '.' + parsed_url.netloc.split('.')[-1]  # Get main domain
+            if domain not in ['kemono.su', 'coomer.su']:
+                tqdm.write(f"⚠️ Ignoring not allowed domain URL: {url}")
+                continue
 
-        # Derive file extension
-        extension = os.path.splitext(parsed_url.path)[1] or '.bin'
+            # Derive file extension
+            extension = os.path.splitext(parsed_url.path)[1] or '.bin'
 
-        # Handle case where no original name is provided
-        if not original_name or original_name.strip() == "":
-            sanitized_name = str(idx)
-        else:
-            sanitized_name = adapt_file_name(original_name)
+            # Handle case where no original name is provided
+            if not original_name or original_name.strip() == "":
+                sanitized_name = str(idx)
+            else:
+                sanitized_name = adapt_file_name(original_name)
 
-        # Generate unique file name
-        file_name = f"{idx}-{sanitized_name}{extension}"
-        if file_name in seen_files:
-            continue  # Skip duplicates
+            # Generate unique file name
+            file_name = f"{idx}-{sanitized_name}{extension}"
+            if file_name in seen_files:
+                continue  # Skip duplicates
 
-        seen_files.add(file_name)
-        file_path = os.path.join(folder_path, file_name)
+            seen_files.add(file_name)
+            file_path = os.path.join(folder_path, file_name)
 
-        # Download the file
-        try:
-            response = requests.get(url, stream=True)
-            response.raise_for_status()
-            with open(file_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    file.write(chunk)
-            print(f"Downloaded: {file_name}")
-        except Exception as e:
-            print(f"Download failed {url}: {e}")
+            # Download the file
+            executer.submit(download_file, url, file_path)
 
 
 def save_post_content(post_data, folder_path, config):
@@ -341,26 +396,16 @@ def save_post_content(post_data, folder_path, config):
     # Download files to the specified folder
     download_files(unique_files_to_download, folder_path)
 
-def sanitize_filename(value):
-    """Remove caracteres que podem quebrar a criação de pastas."""
-    return value.replace("/", "_").replace("\\", "_")
-    
-def main():
-    # Carregar configurações
-    config = load_config()
+def sanitize_filename(filename):
+    """Sanitize filename by removing invalid characters and replacing spaces with underscores."""
+    filename = re.sub(r'[\\/*?\"<>|:]|[\\/*?\"<>|:\.]+$', '', filename)
+    return filename.replace(' ', '_')
 
-    # Verificar se links foram passados por linha de comando
-    if len(sys.argv) < 2:
-        print("Please provide at least one link as an argument.")
-        print("Example: python kcposts.py https://kemono.su/link1, https://coomer.su/link2")
-        sys.exit(1)
-
-    # Processar cada link passado
-    links = sys.argv[1:]
-    
-    for user_link in links:
+def process_links(links, config):
+    bar = tqdm(links, position=0)
+    for user_link in bar:
         try:
-            print(f"\n--- Processing link: {user_link} ---")
+            # print(f"\n--- Processing link: {user_link} ---")
             
             # Extract data from the link
             domain, service, user_id, post_id = extract_data_from_link(user_link)
@@ -394,22 +439,94 @@ def main():
             posts_folder = os.path.join(user_folder, "posts")
             ensure_directory(posts_folder)
 
-            post_folder = os.path.join(posts_folder, post_id)
-            ensure_directory(post_folder)
-
             # Fetch post data
             post_data = fetch_post(domain, service, user_id, post_id)
+            post_folder = os.path.join(posts_folder, sanitize_filename(f"{post_id}_{post_data['post']['title']}"))
+            bar.set_description(f"Processing: {post_id} {post_data['post']['title'][:30]}")
+
+            ensure_directory(post_folder)
+
             
             # Salvar conteúdo do post usando as configurações
             save_post_content(post_data, post_folder, config)
 
-            print(f"\n✅ Link processed successfully: {user_link}")
-
         except Exception as e:
-            print(f"❌ Error processing link {user_link}: {e}")
-            import traceback
-            traceback.print_exc()
+            tqdm.write(f"❌ Error processing link {user_link}: {e}")
+            # import traceback
+            # traceback.print_exc()
             continue  # Continua processando próximos links mesmo se um falhar
+    bar.close()
+
+def process_json(json_file_path, config):
+    # Pega o caminho do arquivo JSON a partir do argumento da linha de comando
+
+    # Verifica se o arquivo existe
+    if not os.path.exists(json_file_path):
+        print(f"Error: The file '{json_file_path}' was not found.")
+        sys.exit(1)
+
+    # Load the JSON file
+    with open(json_file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Base folder for posts
+    base_folder = os.path.join(os.path.dirname(json_file_path), "posts")
+    os.makedirs(base_folder, exist_ok=True)
+
+    # Pegar o valor de 'process_from_oldest' da configuração
+    process_from_oldest = config.get("process_from_oldest", True)  # Valor padrão é True
+
+    posts = data.get("posts", [])
+    if process_from_oldest:
+        posts = reversed(posts)
+    post_links = []
+    for post in posts:
+        post_folder = normalize_path(os.path.join(base_folder, sanitize_filename(f"{post.get("id")}_{post.get('title')}")))
+        ensure_directory(post_folder)
+        expected_files_count = len(post.get('files')) + 1 # files.md
+        # Contar arquivos já existentes na pasta
+        existing_files = [f for f in os.listdir(post_folder) if os.path.isfile(os.path.join(post_folder, f))]
+        existing_files_count = len(existing_files)
+
+        # Se já tem todos os arquivos, pula o download
+        if existing_files_count == expected_files_count:
+            continue
+        post_links.append(post.get("link"))
+
+    process_links(post_links, config)
+    # Process each post sequentially
+    """
+    with tqdm(total=len(posts), position=0, leave=False) as bar:
+        for post_index, post in tqdm(enumerate(posts, start=1)):
+            bar.update(post_index - 1)
+            bar.set_description(f"Processing {post['id']} {post['title'][:30]}")
+            process_post(post, base_folder)
+            time.sleep(2)  # Wait 2 seconds between posts
+    """
+
+
+def main():
+    # Carregar configurações
+    config = load_config()
+
+    # Verificar se links foram passados por linha de comando
+    if len(sys.argv) < 2:
+        print("Please provide at least one link as an argument.")
+        print("Example: python kcposts.py https://kemono.su/link1, https://coomer.su/link2")
+        print("Or please input json file with --json argument.")
+        print("Example: python kcposts.py --json {json_path}")
+        sys.exit(1)
+
+    if sys.argv[1] == "--json":
+        json_file_path = sys.argv[2]
+        process_json(json_file_path, config)
+
+
+    else:
+        # Processar cada link passado
+        links = sys.argv[1:]
+        process_links(links, config)
+    
 
 if __name__ == "__main__":
     main()
