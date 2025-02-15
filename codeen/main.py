@@ -224,7 +224,7 @@ def download_profile_posts():
         elif choice == '2':
             page = input("Enter the page number (0 = first page, 50 = second, etc.): ")
             posts_process = subprocess.run(['python', os.path.join('codes', 'posts.py'), profile_link, page], 
-                                           capture_output=True, text=True, check=True)
+                                           capture_output=True, text=True, check=True, encoding='UTF-8')
             for line in posts_process.stdout.split('\n'):
                 if line.endswith('.json'):
                     json_path = line.strip()
@@ -234,7 +234,7 @@ def download_profile_posts():
             start_page = input("Enter the start page (start, 0, 50, 100, etc.): ")
             end_page = input("Enter the final page (or use end, 300, 350, 400): ")
             posts_process = subprocess.run(['python', os.path.join('codes', 'posts.py'), profile_link, f"{start_page}-{end_page}"], 
-                                           capture_output=True, text=True, check=True)
+                                           capture_output=True, text=True, check=True, encoding='UTF-8')
             for line in posts_process.stdout.split('\n'):
                 if line.endswith('.json'):
                     json_path = line.strip()
@@ -248,7 +248,7 @@ def download_profile_posts():
             second_id = second_post.split('/')[-1] if '/' in second_post else second_post
             
             posts_process = subprocess.run(['python', os.path.join('codes', 'posts.py'), profile_link, f"{first_id}-{second_id}"], 
-                                           capture_output=True, text=True, check=True)
+                                           capture_output=True, text=True, check=True, encoding='UTF-8')
             for line in posts_process.stdout.split('\n'):
                 if line.endswith('.json'):
                     json_path = line.strip()
