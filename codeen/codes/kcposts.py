@@ -418,8 +418,6 @@ async def process_links(links, config):
         futures = []
         for user_link in links:
             try:
-                # print(f"\n--- Processing link: {user_link} ---")
-                
                 # Extract data from the link
                 domain, service, user_id, post_id = extract_data_from_link(user_link)
 
@@ -515,14 +513,6 @@ async def process_json(json_file_path, config):
 
     await process_links(post_links, config)
     # Process each post sequentially
-    """
-    with tqdm(total=len(posts), position=0, leave=False) as bar:
-        for post_index, post in tqdm(enumerate(posts, start=1)):
-            bar.update(post_index - 1)
-            bar.set_description(f"Processing {post['id']} {post['title'][:30]}")
-            process_post(post, base_folder)
-            time.sleep(2)  # Wait 2 seconds between posts
-    """
 
 
 async def main():
