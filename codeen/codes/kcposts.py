@@ -64,10 +64,10 @@ class DownloadManager:
                 full_path = Path(save_path)
                 dirname = full_path.parts[-2]
                 if len(dirname) > 20:
-                    dirname = dirname[:17] + "..."
+                    dirname = dirname[:17] + "…"
                 filename = full_path.name
                 if len(filename) > 15:
-                    filename = filename[:8] + "..." + filename[-4:]
+                    filename = filename[:8] + "…" + filename[-4:]
                 name = f"{dirname:>20}/{filename:15}"
                 bar.set_description(name)
                 with open(save_path, 'wb') as f:
@@ -472,6 +472,7 @@ async def process_links(links, config):
 
         bar.set_description("Wait until download is finished...")
         result = await asyncio.gather(*futures)
+        bar.set_description("Done!")
         bar.update()
         bar.refresh()
 
